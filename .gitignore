@@ -1,0 +1,200 @@
+# ============================================================
+# Sentinel — .gitignore
+# Python + React (Node) monorepo
+# ============================================================
+
+
+# ------------------------------------------------------------
+# Python
+# ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+wheels/
+*.egg-link
+pip-wheel-metadata/
+share/python-wheels/
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Distribution / packaging
+.Python
+develop-eggs/
+downloads/
+lib/
+lib64/
+.installed.cfg
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+pytestdebug.log
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# Jupyter notebooks
+.ipynb_checkpoints
+*.ipynb
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Ruff / linting
+.ruff_cache/
+
+
+# ------------------------------------------------------------
+# Node / TypeScript / React
+# ------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+lerna-debug.log*
+
+# Build output
+dist/
+build/
+out/
+.next/
+.nuxt/
+.cache/
+.parcel-cache/
+.turbo/
+
+# Testing
+coverage/
+.nyc_output/
+*.lcov
+junit.xml
+
+# TypeScript
+*.tsbuildinfo
+
+# Vite
+vite.config.ts.timestamp-*
+
+# Storybook
+storybook-static/
+
+
+# ------------------------------------------------------------
+# Environment & secrets — NEVER commit these
+# ------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+secrets/
+credentials.json
+service-account.json
+
+
+# ------------------------------------------------------------
+# Editor & OS
+# ------------------------------------------------------------
+
+# VS Code
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+
+# JetBrains / PyCharm
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+
+# ------------------------------------------------------------
+# Docker
+# ------------------------------------------------------------
+.dockerignore
+docker-compose.override.yml
+
+
+# ------------------------------------------------------------
+# Logs & temp files
+# ------------------------------------------------------------
+logs/
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+
+
+# ------------------------------------------------------------
+# Project-specific
+# ------------------------------------------------------------
+
+# Sandbox validation artifacts
+sandbox/
+sandbox-results/
+
+# Golden dataset exports (keep schema, not data)
+golden-dataset/*.jsonl
+golden-dataset/*.csv
+
+# Local eval runs
+eval-runs/
+eval-output/
