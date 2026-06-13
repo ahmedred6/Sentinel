@@ -30,6 +30,7 @@ Supports two usage patterns:
 from __future__ import annotations
 
 import functools
+import uuid
 from typing import Any, Callable, Optional
 
 from schema import (
@@ -63,7 +64,13 @@ class SentinelTraceContext:
         self._user_id = user_id
         self._environment = environment
         self._retrieved_context = retrieved_context or []
+        self._trace_id = str(uuid.uuid4())
         self._captured: Optional[dict[str, Any]] = None
+
+    @property
+    def trace_id(self) -> str:
+        """The UUID assigned to this trace. Available immediately after entering the context."""
+        return self._trace_id
 
     # ------------------------------------------------------------------
     # Context manager
@@ -239,6 +246,7 @@ class SentinelTraceContext:
             return
         try:
             payload = TracePayload(
+                trace_id=self._trace_id,
                 customer_id=self._customer_id,
                 session_id=self._session_id,
                 user_id=self._user_id,
