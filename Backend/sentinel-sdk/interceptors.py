@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import Any
 
 # Thread-local slot for the currently active SentinelTraceContext.
 # Each thread gets its own slot so concurrent traces don't interfere.
@@ -23,7 +24,7 @@ _openai_patched: bool = False
 _anthropic_patched: bool = False
 
 
-def get_active() -> object | None:
+def get_active() -> Any:
     return getattr(_local, "ctx", None)
 
 
@@ -62,7 +63,7 @@ def _patch_openai() -> None:
             ctx._record_openai(kwargs, result, int((time.monotonic() - t0) * 1000))
             return result
 
-        _C.create = _wrapped
+        _C.create = _wrapped  # type: ignore[method-assign]
         _openai_patched = True
     except ImportError:
         pass  # openai not installed — skip silently
@@ -89,7 +90,7 @@ def _patch_anthropic() -> None:
             ctx._record_anthropic(kwargs, result, int((time.monotonic() - t0) * 1000))
             return result
 
-        _M.create = _wrapped
+        _M.create = _wrapped  # type: ignore[method-assign]
         _anthropic_patched = True
     except ImportError:
         pass  # anthropic not installed — skip silently

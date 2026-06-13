@@ -1,5 +1,6 @@
 {
   "extraPaths": [
-    "Backend/sentinel-sdk"
+    "Backend/sentinel-sdk",
+    "Backend/ingest_api"
   ]
 }
