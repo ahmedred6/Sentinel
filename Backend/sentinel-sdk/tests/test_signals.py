@@ -193,7 +193,12 @@ class TestAsyncShipper:
         """A network error must be silently swallowed — never crash the caller."""
         from shipper import AsyncShipper
 
-        # base_url points nowhere — _post will raise URLError
-        shipper = AsyncShipper(base_url="http://localhost:1", api_key="sk_test", timeout=1)
+        # Use fast retry_delays so the test completes quickly
+        shipper = AsyncShipper(
+            base_url="http://localhost:1",
+            api_key="sk_test",
+            timeout=1,
+            retry_delays=(0.01, 0.01, 0.01),
+        )
         shipper.enqueue(_SIGNAL_ENDPOINT, {"signal_type": "escalate"})
         shipper.flush()  # should complete without raising
