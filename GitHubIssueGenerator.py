@@ -1,7 +1,7 @@
 """
 create_week3_tickets.py
 
-Creates all 6 Week 3 (Module 2 - Ingest Pipeline) tickets in the Sentinel
+Creates all 5 Week 5 (Module - Diff Analyzer) tickets in the Sentinel
 GitHub repo and adds them to your GitHub Projects v2 kanban board.
 
 Requirements:
@@ -46,13 +46,319 @@ HEADERS = {
 # ─────────────────────────────────────────────
 TICKETS = [
     {
-        "title": "[EVAL-01] Build Redis eval-worker consumer",
-        "labels": ["core-path", "module-3-eval", "week-5"],
+        "title": "[DIFF-01] Extend SDK with git diff capture and run metadata",
+        "labels": ["core-path", "module-diff-analyzer", "week-5", "p0"],
         "body": """## Context
-The eval-worker is the entry point of the eval engine. It reads traces from the Redis Stream and dispatches each one through all three evaluation layers. It is the orchestrator — it doesn't do the scoring itself, it coordinates the layers and writes the final result.
+The diff analyzer depends on the SDK capturing two things automatically on every pipeline run: the git diff of the developer's current changes, and metadata about who ran it and on which branch. This must happen silently in the background — the developer should never have to think about it.
 
 ## Task
-Build the async worker that consumes from the `eval-worker` consumer group and dispatches each trace to Layer 1, Layer 2, and Layer 3.
+Extend the existing SDK (built in SDK-02) with git diff capture, Stage 1 file filtering, and run metadata collection.
+
+## Implementation details
+
+### Step 1 — Find git repo root
+```python
+def _find_git_root() -> str | None:
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, timeout=3
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+```
+
+### Step 2 — Capture diff against origin/main
+```python
+def _capture_git_diff(root: str) -> str | None:
+    # Primary: diff against origin/main
+    result = subprocess.run(
+        ["git", "diff", "HEAD", "origin/main"],
+        capture_output=True, text=True, cwd=root, timeout=5
+    )
+    if result.returncode == 0:
+        return result.stdout or None  # None if no changes vs main
+
+    # Fallback: diff against last local commit
+    result = subprocess.run(
+        ["git", "diff", "HEAD"],
+        capture_output=True, text=True, cwd=root, timeout=5
+    )
+    return result.stdout or None
+```
+
+### Step 3 — Stage 1 file filter
+```python
+LLM_RELEVANT_PATTERNS = [
+    "**/*.txt", "**/prompts/**", "**/agents/**/*.py",
+    "**/tools/**/*.py", "**/schemas/**",
+    "**/config/models*", "**/retrieval/**", "**/rubrics/**",
+]
+ALWAYS_IRRELEVANT_PATTERNS = [
+    "**/tests/**", "**/*.md", "**/frontend/**",
+    "requirements.txt", "docker-compose*",
+    "**/.env*", "**/migrations/**", "**/*.css", "**/*.html",
+]
+
+def _filter_diff(raw_diff: str) -> str:
+    # Parse diff into per-file hunks
+    # Keep only hunks from LLM_RELEVANT files
+    # Remove hunks from ALWAYS_IRRELEVANT files
+    # Return filtered diff string
+    ...
+```
+
+### Step 4 — Capture branch and commit metadata
+```python
+def _get_git_metadata(root: str) -> dict:
+    branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True, cwd=root
+    ).stdout.strip()
+
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True, text=True, cwd=root
+    ).stdout.strip()
+
+    return {"branch": branch, "commit_sha": commit}
+```
+
+### Step 5 — Extend sentinel.init()
+```python
+sentinel.init(
+    api_key="sk_staging_xxx",
+    environment="staging",
+    developer="ahmed",        # who is running — required
+    run_id="optional-label",  # auto-generated UUID if omitted
+)
+# branch and commit_sha auto-detected from git
+```
+
+### Step 6 — Ship diff alongside trace
+The background shipper (SDK-02) sends a second payload to `POST /ingest/diff` after sending the trace. The diff payload is fire-and-forget — if it fails, it is logged and dropped. It never affects the trace delivery.
+
+```python
+@dataclass
+class DiffPayload:
+    experiment_id: str      # shared with the trace
+    pipeline_name: str
+    developer: str
+    branch: str
+    base_branch: str        # "origin/main" or "local HEAD"
+    commit_sha: str
+    filtered_diff: str      # output of Stage 1 filter
+    original_files: dict    # filename -> original content (before changes)
+    customer_id: str
+    timestamp: datetime
+```
+
+### Important: original file content
+For each file that appears in the filtered diff, capture the original version before the change using:
+```python
+git show origin/main:<filepath>
+```
+This gives the analyzer the "before" state of each changed file. Do not send the entire project — only the files that have changes.
+
+## File location
+`backend/sentinel_sdk/sentinel/diff_capture.py`
+`backend/sentinel_sdk/sentinel/schema.py` (add DiffPayload)
+
+## Acceptance criteria
+- [ ] `_find_git_root()` works from any subdirectory within a repo
+- [ ] Diff captured against origin/main with fallback to local HEAD
+- [ ] Stage 1 filter correctly includes LLM-relevant files and excludes irrelevant ones
+- [ ] Original file content captured for each changed file via `git show`
+- [ ] Branch and commit SHA auto-detected from git
+- [ ] `sentinel.init()` accepts `developer` and optional `run_id`
+- [ ] DiffPayload schema defined and validated with Pydantic
+- [ ] Diff capture runs on background thread — never blocks pipeline execution
+- [ ] All git failures handled silently — run always proceeds regardless
+- [ ] Unit tests: repo found, repo not found, no changes vs main, empty diff after filter
+"""
+    },
+    {
+        "title": "[DIFF-02] Add /ingest/diff endpoint and sentinel:diffs Redis Stream",
+        "labels": ["core-path", "module-diff-analyzer", "week-5", "p0"],
+        "body": """## Context
+The ingest API needs a new endpoint to receive DiffPayload from the SDK, and a second Redis Stream to carry diff payloads to the diff-analyzer-worker independently of the trace stream.
+
+## Task
+Add `POST /ingest/diff` to the FastAPI ingest API and configure the `sentinel:diffs` Redis Stream with its consumer group.
+
+## Implementation details
+
+### New endpoint
+```python
+@app.post("/ingest/diff")
+async def ingest_diff(payload: DiffPayload, customer_id: str = Depends(get_customer_id)):
+    # Auth and rate limiting — same middleware as /ingest/trace
+    # No dedup check needed — diffs are not idempotent
+    await enqueue_diff(payload, redis)
+    return {"status": "ok", "experiment_id": payload.experiment_id}
+```
+
+### New Redis Stream
+```python
+# Stream: sentinel:diffs
+# Consumer group: diff-analyzer
+# One worker consumes this group
+
+async def enqueue_diff(payload: DiffPayload, redis: Redis):
+    await redis.xadd(
+        "sentinel:diffs",
+        {"payload": payload.model_dump_json()},
+        maxlen=50_000,
+    )
+```
+
+### Stream configuration
+- Stream name: `sentinel:diffs`
+- Consumer group: `diff-analyzer`
+- Max length: 50,000 messages (diffs are larger than traces)
+- Messages persist 48 hours (longer than traces — diffs are rarer and more valuable)
+
+### experiment_id linkage
+The `experiment_id` field in DiffPayload must match the `experiment_id` in the corresponding TracePayload. This is how the two workers (eval-worker and diff-analyzer-worker) write their results to the same experiment record in PostgreSQL. The SDK generates experiment_id once per pipeline run and attaches it to both payloads.
+
+## File location
+`backend/ingest_api/main.py` (new endpoint)
+`backend/ingest_api/streams.py` (new enqueue_diff function)
+
+## Acceptance criteria
+- [ ] `POST /ingest/diff` accepts valid DiffPayload and returns 200
+- [ ] Invalid schema returns 422
+- [ ] Payload enqueued to `sentinel:diffs` stream
+- [ ] `sentinel:diffs` stream created with `diff-analyzer` consumer group
+- [ ] Stream capped at 50,000 messages
+- [ ] experiment_id confirmed present in payload and stored in stream message
+- [ ] Auth and rate limiting applied same as /ingest/trace
+- [ ] Integration test: SDK ships diff → endpoint receives → message appears in stream
+"""
+    },
+    {
+        "title": "[DIFF-03] Create experiments table in PostgreSQL",
+        "labels": ["infrastructure", "module-diff-analyzer", "week-5"],
+        "body": """## Context
+The experiments table is where the eval-worker and diff-analyzer-worker write their results independently. It joins run scores with diff attribution into one record that the dashboard reads. It needs to support partial writes — scores arrive before attribution.
+
+## Task
+Add the experiments table to the PostgreSQL migration script (INGEST-04) and implement the write functions used by both workers.
+
+## Schema
+```sql
+CREATE TABLE experiments (
+    experiment_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    run_id                TEXT,
+    pipeline_name         TEXT NOT NULL,
+    customer_id           TEXT NOT NULL,
+    developer             TEXT NOT NULL,
+    branch                TEXT,
+    base_branch           TEXT,
+    commit_sha            TEXT,
+
+    -- Scores (written by eval-worker)
+    pipeline_score        FLOAT,
+    score_delta_vs_prev   FLOAT,   -- vs previous run on same branch
+    score_delta_vs_main   FLOAT,   -- vs latest run on origin/main
+    agent_scores          JSONB,
+    scores_ready          BOOLEAN DEFAULT FALSE,
+
+    -- Diff (written by diff-analyzer-worker)
+    changed_files         TEXT[],
+    relevant_files        TEXT[],
+    filtered_diff         TEXT,
+    original_files        JSONB,   -- filename -> original content
+
+    -- Attribution (written by diff-analyzer-worker)
+    title                 TEXT,
+    description           TEXT,
+    impact                TEXT CHECK (impact IN ('positive','negative','neutral','unstable')),
+    affected_agents       TEXT[],
+    confidence            FLOAT,
+    attribution_ready     BOOLEAN DEFAULT FALSE,
+
+    -- No-diff case
+    is_no_diff_run        BOOLEAN DEFAULT FALSE,
+
+    created_at            TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_experiments_pipeline_developer
+    ON experiments (pipeline_name, developer, created_at DESC);
+
+CREATE INDEX idx_experiments_branch
+    ON experiments (branch, created_at DESC);
+```
+
+## Write functions
+
+### Called by eval-worker after scoring
+```python
+async def write_experiment_scores(
+    experiment_id: str,
+    pipeline_score: float,
+    agent_scores: dict,
+    developer: str,
+    branch: str,
+    pipeline_name: str,
+    customer_id: str,
+):
+    # Compute score_delta_vs_prev:
+    # SELECT pipeline_score FROM experiments
+    # WHERE developer = ? AND branch = ? AND pipeline_name = ?
+    # ORDER BY created_at DESC LIMIT 1
+
+    # Compute score_delta_vs_main:
+    # SELECT pipeline_score FROM experiments
+    # WHERE branch = 'origin/main' AND pipeline_name = ?
+    # ORDER BY created_at DESC LIMIT 1
+
+    # Upsert into experiments with scores_ready = TRUE
+    ...
+```
+
+### Called by diff-analyzer-worker after attribution
+```python
+async def write_experiment_attribution(
+    experiment_id: str,
+    title: str,
+    description: str,
+    impact: str,
+    affected_agents: list[str],
+    confidence: float,
+    changed_files: list[str],
+    relevant_files: list[str],
+):
+    # UPDATE experiments SET
+    #   title = ?, description = ?, impact = ?,
+    #   affected_agents = ?, confidence = ?,
+    #   changed_files = ?, relevant_files = ?,
+    #   attribution_ready = TRUE
+    # WHERE experiment_id = ?
+    ...
+```
+
+## File location
+`backend/ingest_api/migrations/003_experiments.sql`
+`backend/eval_engine/experiments.py`
+
+## Acceptance criteria
+- [ ] Experiments table created with all columns and indexes
+- [ ] `write_experiment_scores()` correctly computes both deltas
+- [ ] `write_experiment_attribution()` updates correct record by experiment_id
+- [ ] Both functions can write independently without conflict
+- [ ] `is_no_diff_run` correctly set when filtered_diff is empty
+- [ ] Dashboard query confirmed: can fetch experiments with scores_ready=TRUE before attribution_ready=TRUE
+- [ ] Unit tests: write scores only, write attribution only, write both, compute delta with no previous run
+"""
+    },
+    {
+        "title": "[DIFF-04] Build diff-analyzer-worker",
+        "labels": ["core-path", "module-diff-analyzer", "week-5", "p0"],
+        "body": """## Context
+The diff-analyzer-worker is the brain of this module. It consumes from the sentinel:diffs stream, runs a two-stage filter to isolate the most causally relevant changes, and uses Claude Sonnet to generate a human-readable attribution connecting the code change to the observed score delta.
+
+## Task
+Build the async worker that consumes from `sentinel:diffs`, runs Stage 2 semantic filtering, and generates attribution using Claude Sonnet.
 
 ## Implementation details
 
@@ -61,322 +367,269 @@ Build the async worker that consumes from the `eval-worker` consumer group and d
 async def run():
     while True:
         messages = await redis.xreadgroup(
-            groupname="eval-worker",
-            consumername="eval-worker-1",
-            streams={"sentinel:traces": ">"},
-            count=10,
+            groupname="diff-analyzer",
+            consumername="diff-analyzer-1",
+            streams={"sentinel:diffs": ">"},
+            count=5,
             block=2000,
         )
         for stream, entries in messages:
             for msg_id, data in entries:
-                trace = TracePayload.model_validate_json(data[b"payload"])
-                await process_trace(trace, msg_id)
-
-async def process_trace(trace: TracePayload, msg_id: str):
-    l1 = await run_layer1(trace)
-    l2 = await run_layer2(trace)
-    l3 = await run_layer3(trace)
-    report = aggregate(l1, l2, l3)
-    await write_score(report)
-    await redis.xack("sentinel:traces", "eval-worker", msg_id)
+                payload = DiffPayload.model_validate_json(data[b"payload"])
+                await process_diff(payload, msg_id)
 ```
 
-### Important
-- ACK only after score is written to PostgreSQL
-- If any layer throws, log the error and ACK anyway — never leave a message unACKed permanently
-- Layers 1 and 2 run immediately; Layer 3 runs async (don't block on it)
+### Stage 2 semantic filter (Claude Haiku)
+```python
+async def stage2_filter(filtered_diff: str) -> str:
+    if not filtered_diff:
+        return ""
+
+    response = await haiku(f'''
+        Given these code changes in LLM-relevant files,
+        which specific hunks could plausibly affect LLM output quality?
+
+        Ignore: logging changes, error handling, formatting,
+        comments, variable renames that don't change logic.
+
+        Return only the relevant hunks with one-line reasoning each.
+        If nothing is relevant, return empty string.
+
+        Diff:
+        {filtered_diff}
+    ''')
+    return response
+```
+
+### Attribution (Claude Sonnet)
+```python
+async def generate_attribution(
+    semantic_diff: str,
+    original_files: dict,
+    agent_scores: dict,
+    score_delta_vs_prev: float,
+    score_delta_vs_main: float,
+) -> dict:
+
+    if not semantic_diff:
+        # No-diff case — score changed without code changes
+        return {
+            "title": "No code changes — score drift detected",
+            "description": (
+                f"This run used identical code to the previous run but produced "
+                f"a different score (delta: {score_delta_vs_prev:+.2f}). "
+                f"This indicates non-determinism in the pipeline. Consider "
+                f"lowering model temperature or adding output constraints "
+                f"to improve stability."
+            ),
+            "impact": "unstable",
+            "affected_agents": [],
+            "confidence": 1.0,
+        }
+
+    # Build context: original files + what changed
+    file_context = ""
+    for filename, original_content in original_files.items():
+        file_context += f"\\n--- ORIGINAL: {filename} ---\\n{original_content}\\n"
+
+    response = await sonnet(f'''
+        You are analyzing a code change made to an LLM pipeline.
+
+        ORIGINAL FILE CONTENT (before changes):
+        {file_context}
+
+        WHAT CHANGED (diff — only LLM-relevant hunks):
+        {semantic_diff}
+
+        SCORE BEFORE THIS RUN: see agent_scores context
+        SCORE DELTA VS PREVIOUS RUN: {score_delta_vs_prev:+.2f}
+        SCORE DELTA VS MAIN BRANCH:  {score_delta_vs_main:+.2f}
+        AGENT SCORES THIS RUN: {agent_scores}
+
+        Based on the original file content and what changed,
+        explain what the developer modified and why it caused
+        this specific score delta. Be precise — quote the
+        exact change and connect it to the specific agent and
+        dimension that was affected.
+
+        Return JSON only:
+        {{
+            "title": "under 8 words describing the change",
+            "description": "2-3 sentences connecting the specific change to the score delta",
+            "impact": "positive|negative|neutral|unstable",
+            "affected_agents": ["agent-name"],
+            "confidence": 0.0-1.0
+        }}
+    ''')
+
+    return parse_json_response(response)
+```
+
+### Full process_diff flow
+```python
+async def process_diff(payload: DiffPayload, msg_id: str):
+    try:
+        # Wait for scores to be ready (poll with timeout)
+        scores = await wait_for_scores(payload.experiment_id, timeout=30)
+
+        # Stage 2 filter
+        semantic_diff = await stage2_filter(payload.filtered_diff)
+
+        # Attribution
+        attribution = await generate_attribution(
+            semantic_diff=semantic_diff,
+            original_files=payload.original_files,
+            agent_scores=scores.agent_scores,
+            score_delta_vs_prev=scores.score_delta_vs_prev,
+            score_delta_vs_main=scores.score_delta_vs_main,
+        )
+
+        # Write to experiments table
+        await write_experiment_attribution(
+            experiment_id=payload.experiment_id,
+            changed_files=list(payload.original_files.keys()),
+            relevant_files=_extract_relevant_filenames(semantic_diff),
+            **attribution,
+        )
+
+        await redis.xack("sentinel:diffs", "diff-analyzer", msg_id)
+
+    except Exception as e:
+        log.error(f"diff-analyzer failed for {payload.experiment_id}: {e}")
+        await redis.xack("sentinel:diffs", "diff-analyzer", msg_id)
+```
+
+## Important: waiting for scores
+The diff-analyzer-worker needs the score delta to generate attribution. Since eval-worker and diff-analyzer-worker run in parallel, scores may not be ready yet when the diff arrives. The worker polls PostgreSQL for up to 30 seconds before proceeding. If scores never arrive, it generates attribution without the delta and notes this in the description.
 
 ## File location
-`backend/eval_engine/worker.py`
+`backend/diff_analyzer/worker.py`
+`backend/diff_analyzer/filter.py`
+`backend/diff_analyzer/attribution.py`
 
 ## Acceptance criteria
-- [ ] Worker consumes from `eval-worker` consumer group correctly
-- [ ] Each trace dispatched to all three layers
-- [ ] ACK sent only after score written to PostgreSQL
-- [ ] Failed layer logged but does not crash the worker
-- [ ] Worker tested with 10 real traces from Redis
-- [ ] Deployed as separate service from ingest API
+- [ ] Worker consumes from `diff-analyzer` consumer group correctly
+- [ ] Stage 2 filter removes irrelevant hunks correctly (tested with mixed diff)
+- [ ] No-diff case produces correct "score drift detected" attribution
+- [ ] Attribution JSON parsed correctly — invalid JSON returns neutral result and logs error
+- [ ] Original file content used correctly — attribution quotes actual before-state
+- [ ] Score delta wait logic works — polls with 30s timeout, proceeds gracefully on timeout
+- [ ] XACK sent after write regardless of success or failure
+- [ ] Deployed as separate Railway service
+- [ ] Unit tests: with diff, without diff, invalid JSON response, scores timeout
 """
     },
     {
-        "title": "[EVAL-02] Implement Layer 1 — heuristic checks",
-        "labels": ["core-path", "demo-visible", "module-3-eval", "week-5"],
+        "title": "[DIFF-05] Build experiment log page in developer dashboard",
+        "labels": ["demo-visible", "module-diff-analyzer", "week-5", "p0"],
         "body": """## Context
-Layer 1 is the fastest and cheapest layer. Pure deterministic logic — no API calls, no ML, no latency. It catches clear-cut failures in milliseconds and is the first thing that runs on every trace.
+The experiment log is the developer-facing page that makes the diff analyzer visible. It shows every run made by every developer on the team with auto-generated titles, score deltas, attribution, and the ability to compare any two runs. This page is required for the demo.
 
 ## Task
-Implement all 7 heuristic checks as a single `run_layer1(trace)` function that returns a list of findings.
+Build the experiment log page in the developer dashboard. It reads from the experiments table in PostgreSQL and updates progressively — scores appear immediately, attribution appears when ready.
 
-## The 7 checks
+## Page layout
 
-### 1. Response length anomaly
-- Trigger: complex question (user prompt > 50 words) answered in under 20 words
-- Severity: medium
-- Evidence: `f"Complex question answered in {word_count} words"`
+### Header stats
+- Total runs today across all developers
+- Best run score today (and who made it)
+- Worst run score today (and who made it)
+- Number of no-diff drift runs detected today
 
-### 2. Context contradiction
-- Trigger: LLM response contains a claim that directly opposes a statement in retrieved context
-- Implementation: for each retrieved document, check if response contradicts key claims using sentence-level comparison
-- Severity: high
-- Evidence: `f"Response says '{claim}' but context states '{contradiction}'"`
+### Experiment list (one row per run, sorted newest first)
+Each row shows:
+run_id   developer   branch   timestamp   score   delta_vs_prev   delta_vs_main   impact
 
-### 3. Repetition loop
-- Trigger: same response pattern delivered 3+ times in message history
-- Implementation: compare response against last 5 assistant turns using similarity ratio > 0.85
-- Severity: medium
-- Evidence: `f"Response repeated {n} times in session"`
+Clicking a row expands it to show:
+Title:          "Softened score cap from must to should"
 
-### 4. Refusal when answer exists
-- Trigger: response contains refusal phrases ("I don't know", "I can't help", "I'm not sure") but retrieved context clearly contains the answer
-- Severity: high
-- Evidence: `f"AI refused but context contains: '{relevant_excerpt}'"`
+Description:    "Developer changed must not exceed to should not exceed..."
 
-### 5. Tool call schema failure
-- Trigger: tool call input does not match expected schema (missing required fields or wrong types)
-- Severity: high
-- Evidence: `f"Tool '{tool_name}' called with invalid schema: missing field '{field}'"`
+Files changed:  prompts/score_assignor.txt (+1 -1)
 
-### 6. Context window exhaustion
-- Trigger: total token count in message history exceeds 80% of model context limit
-- Model limits: gpt-4.1 = 128k, claude-sonnet = 200k, default = 8k
-- Severity: medium
-- Evidence: `f"Context at {pct}% of {model_name} limit ({token_count}/{max_tokens} tokens)"`
+Agents:         score-assignor
 
-### 7. Hallucinated citation
-- Trigger: response references a source (e.g. "according to policy X") not present in retrieved_context sources
-- Severity: high
-- Evidence: `f"AI cited '{source}' which was not in retrieved context"`
+Confidence:     0.97
 
-## Output format
+Agent scores:   fact-extractor 4.4 | keyword-searcher 2.8 | score-assignor 1.8
+
+### Progressive loading behaviour
+- Row appears as soon as scores_ready = TRUE
+- Title and description show as "Analyzing changes..." until attribution_ready = TRUE
+- Dashboard polls every 3 seconds for attribution updates
+- No full page reload needed — only the pending rows update
+
+### No-diff run display
+Runs where is_no_diff_run = TRUE display with a distinct visual treatment:
+~ unstable   "No code changes — score drift detected"
+
+"Same code produced different scores. Pipeline is non-deterministic."
+
+### Compare button
+Any two runs can be compared side by side:
+- Left: selected run A (agent scores, files changed, attribution)
+- Right: selected run B (agent scores, files changed, attribution)
+- Diff between the two diffs shown in the middle
+
+### Actions per run
+- Open failing traces in trace inspector
+- Add traces from this run to golden dataset
+- Mark as team baseline (sets this run as the reference for score_delta_vs_main)
+- Copy experiment_id to clipboard
+
+## Backend query (FastAPI)
 ```python
-@dataclass
-class Layer1Finding:
-    check_name: str
-    triggered: bool
-    severity: str  # "low" | "medium" | "high" | "critical"
-    evidence: str
-    confidence: float  # 0.0 - 1.0
-```
+GET /experiments?pipeline=rfp-evaluator&limit=50&offset=0
 
-## File location
-`backend/eval_engine/layer1.py`
-
-## Acceptance criteria
-- [ ] All 7 checks implemented and individually tested
-- [ ] Each check returns a `Layer1Finding` regardless of whether it triggered
-- [ ] Context contradiction tested against the demo scenario (refund after 40 days)
-- [ ] Hallucinated citation tested with a trace that references a non-existent source
-- [ ] Full layer runs in under 100ms on a typical trace
-- [ ] Unit tests: one passing and one failing case per check (14 tests minimum)
-"""
-    },
+Response:
+{
+  "experiments": [
     {
-        "title": "[EVAL-03] Implement Layer 2 — behavioral signals",
-        "labels": ["demo-visible", "module-3-eval", "week-5"],
-        "body": """## Context
-Layer 2 reads the behavioral signals already captured in the trace by the SDK. These are the most honest quality signals — a user who immediately rephrases their question is telling you directly the answer was bad. No API calls, no ML — just reading what the user did.
-
-## Task
-Implement `run_layer2(trace)` that reads signals from the trace and returns a Layer2Result.
-
-## Signal logic
-
-| Signal | Source field | Interpretation | Severity boost |
-|---|---|---|---|
-| `thumbs_down` | `SignalPayload` linked to trace | Confirmed failure | +2 severity levels |
-| `escalate` | `SignalPayload` linked to trace | AI could not resolve | high |
-| `rephrased` | `SignalPayload` linked to trace | Probable failure | medium |
-| `abandoned` | `SignalPayload` linked to trace | Probable failure/frustration | medium |
-| `acknowledged` | `SignalPayload` linked to trace | Probable success | reduces severity |
-
-## Implementation details
-- Query PostgreSQL for any `SignalPayload` records linked to this `trace_id`
-- Signals may arrive after the trace (async) — if none found, return neutral result
-- `thumbs_down` alone is enough to mark a trace as confirmed failure
-- Multiple signals compound: `rephrased` + `abandoned` = high severity
-
-## Output format
-```python
-@dataclass
-class Layer2Result:
-    has_signals: bool
-    signals_found: list[str]
-    severity_modifier: int  # -1 (reduce) to +2 (boost)
-    confirmed_failure: bool
-    evidence: str
+      "experiment_id": "...",
+      "run_id": "fix-score-assignor-v2",
+      "developer": "ahmed",
+      "branch": "fix/score-assignor",
+      "pipeline_score": 1.8,
+      "score_delta_vs_prev": -2.4,
+      "score_delta_vs_main": -2.4,
+      "agent_scores": {...},
+      "title": "Softened score cap from must to should",
+      "description": "...",
+      "impact": "negative",
+      "affected_agents": ["score-assignor"],
+      "confidence": 0.97,
+      "changed_files": ["prompts/score_assignor.txt"],
+      "scores_ready": true,
+      "attribution_ready": true,
+      "is_no_diff_run": false,
+      "created_at": "2026-06-14T10:44:00Z"
+    }
+  ]
+}
 ```
 
-## File location
-`backend/eval_engine/layer2.py`
+## Demo script requirement
+This page must support the exact demo scenario from the architecture doc:
+1. Baseline run shown with score 4.2
+2. After one-word prompt change: new run appears with score 1.8, delta -2.4, title auto-generated
+3. After revert: new run appears with score 4.1, delta +2.3, title auto-generated
 
-## Acceptance criteria
-- [ ] All 5 signal types handled correctly
-- [ ] `thumbs_down` alone marks trace as confirmed failure
-- [ ] Multiple signals compound correctly
-- [ ] No signals found returns neutral result (does not fail the trace)
-- [ ] PostgreSQL query confirmed working against staging DB
-- [ ] Unit tests: each signal type tested individually + combination test
-"""
-    },
-    {
-        "title": "[EVAL-04] Implement Layer 3 — LLM-as-judge with support AI rubric",
-        "labels": ["demo-visible", "module-3-eval", "week-5"],
-        "body": """## Context
-Layer 3 sends the trace to Claude Haiku with a domain-specific rubric and asks it to score the response. This is the most expensive layer (500ms–2s, ~$0.001 per trace) but produces the richest failure attribution. For MVP we ship with the Support AI rubric pack only.
-
-## Task
-Implement `run_layer3(trace)` that sends the trace to Claude Haiku with the Support AI rubric and returns a structured score.
-
-## Support AI rubric pack
-Evaluate the AI response on these 4 dimensions, each scored 1–5:
-
-1. **Issue resolution** — Did the AI actually solve the user's problem?
-2. **Answer accuracy** — Is the answer factually correct given the retrieved context?
-3. **Tone and empathy** — Was the response appropriately professional and empathetic?
-4. **Correct escalation** — Did the AI escalate to a human when it should have?
-
-## Judge prompt structure
-```python
-SUPPORT_RUBRIC_PROMPT = \"\"\"
-You are an expert evaluator for customer support AI systems.
-
-Evaluate the following AI interaction and score it on each dimension from 1-5.
-Return ONLY valid JSON, no explanation outside the JSON.
-
-Trace:
-User prompt: {user_prompt}
-Retrieved context: {retrieved_context}
-AI response: {llm_response}
-
-Score each dimension 1-5 (1=very poor, 5=excellent):
-{{
-  "issue_resolution": <1-5>,
-  "answer_accuracy": <1-5>,
-  "tone_and_empathy": <1-5>,
-  "correct_escalation": <1-5>,
-  "overall_severity": "low|medium|high|critical",
-  "primary_failure_type": "<one sentence>",
-  "evidence": "<specific quote from response that supports your score>"
-}}
-\"\"\"
-```
-
-## Implementation details
-- Use `claude-haiku-4-5-20251001` model
-- `max_tokens: 300` — response is always short JSON
-- Parse response strictly — if JSON invalid, return a neutral result and log
-- Run asynchronously — do not block Layer 1 or Layer 2
-- Overall score below 3 on any dimension = failure flag
-
-## Output format
-```python
-@dataclass
-class Layer3Result:
-    issue_resolution: int
-    answer_accuracy: int
-    tone_and_empathy: int
-    correct_escalation: int
-    overall_severity: str
-    primary_failure_type: str
-    evidence: str
-    raw_response: str
-```
+The page must be ready to demo before any investor or design partner meeting.
 
 ## File location
-`backend/eval_engine/layer3.py`
+`frontend/src/pages/ExperimentLog.tsx`
+`backend/ingest_api/routes/experiments.py`
 
 ## Acceptance criteria
-- [ ] Claude Haiku called correctly with support rubric prompt
-- [ ] JSON response parsed into `Layer3Result`
-- [ ] Invalid JSON handled gracefully — neutral result returned, error logged
-- [ ] Tested against demo scenario (refund contradiction) — should score answer_accuracy: 1
-- [ ] Async — does not block Layer 1 or Layer 2 results
-- [ ] Cost logged per trace (token counts from API response)
-- [ ] Unit tests with mocked Anthropic API response
-"""
-    },
-    {
-        "title": "[EVAL-05] Build score aggregator",
-        "labels": ["core-path", "module-3-eval", "week-5"],
-        "body": """## Context
-The aggregator takes the outputs of all three layers and merges them into a single structured failure report written to PostgreSQL. This is the final output of the eval engine — what the dashboard reads to show failures.
-
-## Task
-Implement `aggregate(l1, l2, l3)` that merges the three layer outputs into one `FailureReport` and writes it to PostgreSQL.
-
-## Aggregation rules
-
-### Severity resolution
-- Layer 1 heuristic trigger on a clear-cut check (contradiction, hallucinated citation, tool schema) → **overrides** Layer 3 score
-- Layer 2 `thumbs_down` → bumps severity by 2 levels regardless of other scores
-- Layer 2 `acknowledged` with no Layer 1 triggers → reduce severity by 1 level
-- Layer 3 score below 3 on any dimension → minimum severity: medium
-
-### Severity scale
-`low → medium → high → critical`
-
-### Failure type attribution
-- If Layer 1 triggered: use Layer 1 check name as failure type
-- If only Layer 3: use Layer 3 `primary_failure_type`
-- If both: combine — `f"{l1_type} (confirmed by judge)"`
-
-## Output format
-```python
-@dataclass
-class FailureReport:
-    trace_id: str
-    customer_id: str
-    failure_type: str | None   # None if no failure detected
-    severity: str              # "low" | "medium" | "high" | "critical"
-    confidence: float          # 0.0 - 1.0
-    evidence: str
-    layer1_triggered: bool
-    layer2_signals: list[str]
-    layer3_score: dict
-    is_failure: bool           # True if severity >= medium
-    created_at: datetime
-```
-
-## PostgreSQL write
-Insert into `scores` table (already created in INGEST-04).
-
-## File location
-`backend/eval_engine/aggregator.py`
-
-## Acceptance criteria
-- [ ] All aggregation rules implemented and tested
-- [ ] Layer 1 override of Layer 3 confirmed working
-- [ ] Layer 2 thumbs_down severity boost confirmed working
-- [ ] FailureReport written to PostgreSQL scores table
-- [ ] Demo scenario produces: `failure_type="context_contradiction"`, `severity="high"`, `is_failure=True`
-- [ ] Unit tests covering: no failure, layer1 only, layer2 only, layer3 only, all three combined
-"""
-    },
-    {
-        "title": "[EVAL-06] Create golden dataset schema (nice to have)",
-        "labels": ["nice-to-have", "module-3-eval", "week-5"],
-        "body": """## Context
-The golden dataset is the long-term moat of Sentinel. Engineers reviewing traces can mark them as correctly or incorrectly scored — these accumulate in PostgreSQL and eventually feed back to recalibrate Layer 3 judge prompts per customer. For MVP we only need the schema and a basic write function — the recalibration loop itself is Phase 2.
-
-## Task
-Implement the golden dataset write path so the dashboard can mark traces as reviewed in a later ticket.
-
-## Implementation details
-- `golden_dataset` table already created in INGEST-04
-- Add a `save_golden_example(trace_id, customer_id, correct_label, reviewer_note)` function
-- Correct label: `True` = eval engine was right, `False` = eval engine was wrong
-- This function will be called by the dashboard API in Module 4
-
-## File location
-`backend/eval_engine/golden_dataset.py`
-
-## Acceptance criteria
-- [ ] `save_golden_example()` function implemented and tested
-- [ ] Writes correctly to PostgreSQL `golden_dataset` table
-- [ ] Only implement if EVAL-01 through EVAL-05 are complete
-
-## Notes
-Do not build the recalibration loop — that is Phase 2. Schema and write path only.
+- [ ] Experiment list loads correctly from PostgreSQL
+- [ ] Rows appear immediately when scores_ready = TRUE
+- [ ] Attribution updates without page reload when attribution_ready = TRUE
+- [ ] No-diff runs displayed with distinct unstable styling
+- [ ] Compare view works for any two selected runs
+- [ ] All three actions work: open traces, add to dataset, mark as baseline
+- [ ] Backend query filters by pipeline, supports pagination
+- [ ] Demo scenario runs end to end: baseline → change → new run appears → attribution loads
+- [ ] Page works with 0 runs (empty state shown with onboarding instructions)
 """
     },
 ]
@@ -385,11 +638,11 @@ Do not build the recalibration loop — that is Phase 2. Schema and write path o
 # HELPERS
 # ─────────────────────────────────────────────
 
-def graphql(query: str, variables: dict = {}) -> dict:
+def graphql(query: str, variables: dict | None = None) -> dict:
     r = requests.post(
         GRAPHQL_URL,
         headers=HEADERS,
-        json={"query": query, "variables": variables},
+        json={"query": query, "variables": variables or {}},
     )
     r.raise_for_status()
     data = r.json()
@@ -409,13 +662,13 @@ def ensure_labels(labels: list[str]):
     existing = {l["name"] for l in existing_r.json()}
 
     color_map = {
-        "core-path":        "0075ca",
-        "module-2-ingest":  "1D76DB",
-        "week-3":           "BFD4F2",
-        "p0":               "B60205",
-        "infrastructure":   "E4E669",
-        "demo-visible":     "0E8A16",
-        "nice-to-have":     "FEF2C0",
+        "core-path":             "0075ca",
+        "module-diff-analyzer":  "1D76DB",
+        "week-5":                "BFD4F2",
+        "p0":                    "B60205",
+        "infrastructure":        "E4E669",
+        "demo-visible":          "0E8A16",
+        "nice-to-have":          "FEF2C0",
     }
 
     for label in labels:
@@ -494,7 +747,7 @@ def main():
         sys.exit(1)
 
     print(f"\n{'─'*55}")
-    print(f"  Sentinel — Week 3 Ticket Creator")
+    print(f"  Sentinel — Week 5 (DIFF) Ticket Creator")
     print(f"  Repo: {REPO_OWNER}/{REPO_NAME}")
     print(f"{'─'*55}\n")
 

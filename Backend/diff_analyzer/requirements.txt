@@ -1,0 +1,6 @@
+anthropic>=0.40.0
+asyncpg>=0.30.0
+redis>=8.0.0
+fakeredis>=2.20.0
+pydantic>=2.0.0
+pytest>=9.0.0

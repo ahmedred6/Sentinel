@@ -29,6 +29,8 @@ Reporting a user behavior signal after the response is shown:
 
 from __future__ import annotations
 
+import logging
+import threading
 import uuid
 from typing import Optional
 
@@ -37,7 +39,10 @@ from interceptors import install_all
 from schema import ContextDocument, Environment, SignalPayload, SignalType
 from shipper import AsyncShipper
 
+log = logging.getLogger(__name__)
+
 _SIGNALS_ENDPOINT = "/v1/signals"
+_DIFF_ENDPOINT = "/ingest/diff"
 _DEFAULT_BASE_URL = "https://ingest.sentinel-ai.io"
 
 
@@ -46,10 +51,13 @@ class SentinelClient:
     Thread-safe. All I/O is delegated to the background shipper thread.
 
     Args:
-        api_key:      Your Sentinel API key (starts with sk_).
-        customer_id:  Your Sentinel customer identifier (starts with cust_).
-        base_url:     Override the ingest API base URL.
-        _shipper:     Inject a custom shipper — used in tests to avoid real HTTP.
+        api_key:       Your Sentinel API key (starts with sk_).
+        customer_id:   Your Sentinel customer identifier (starts with cust_).
+        base_url:      Override the ingest API base URL.
+        developer:     Identifier for the developer running the pipeline (e.g. git username).
+        pipeline_name: Human-readable name for this pipeline run (e.g. "rfp-evaluator").
+        run_id:        Optional label for this run. Auto-generated UUID if omitted.
+        _shipper:      Inject a custom shipper — used in tests to avoid real HTTP.
     """
 
     def __init__(
@@ -57,9 +65,16 @@ class SentinelClient:
         api_key: str,
         customer_id: str,
         base_url: str = _DEFAULT_BASE_URL,
+        developer: str = "",
+        pipeline_name: str = "",
+        run_id: Optional[str] = None,
         _shipper: Optional[AsyncShipper] = None,
     ) -> None:
         self._customer_id = customer_id
+        self._developer = developer
+        self._pipeline_name = pipeline_name
+        self._run_id = run_id or str(uuid.uuid4())
+        self._experiment_id = str(uuid.uuid4())
         self._shipper = _shipper or AsyncShipper(base_url=base_url, api_key=api_key)
 
     @classmethod
@@ -68,13 +83,45 @@ class SentinelClient:
         api_key: str,
         customer_id: str,
         base_url: str = _DEFAULT_BASE_URL,
+        developer: str = "",
+        pipeline_name: str = "",
+        run_id: Optional[str] = None,
     ) -> "SentinelClient":
         """
-        Primary factory. Starts the background shipper thread and installs
-        OpenAI/Anthropic interceptors. Call once at application startup.
+        Primary factory. Installs OpenAI/Anthropic interceptors, starts the
+        background shipper thread, and fires a one-shot diff capture in a
+        separate daemon thread.  Call once at application startup.
         """
         install_all()
-        return cls(api_key=api_key, customer_id=customer_id, base_url=base_url)
+        client = cls(
+            api_key=api_key,
+            customer_id=customer_id,
+            base_url=base_url,
+            developer=developer,
+            pipeline_name=pipeline_name,
+            run_id=run_id,
+        )
+        threading.Thread(
+            target=client._ship_diff,
+            daemon=True,
+            name="sentinel-diff-capture",
+        ).start()
+        return client
+
+    def _ship_diff(self) -> None:
+        """Background daemon thread: capture git diff and enqueue for shipping."""
+        try:
+            from diff_capture import capture_diff_payload
+            payload = capture_diff_payload(
+                customer_id=self._customer_id,
+                pipeline_name=self._pipeline_name,
+                developer=self._developer,
+                experiment_id=self._experiment_id,
+            )
+            if payload:
+                self._shipper.enqueue(_DIFF_ENDPOINT, payload.model_dump(mode="json"))
+        except Exception:
+            pass  # silently drop — never crash caller's pipeline
 
     # ------------------------------------------------------------------
     # Trace context manager / decorator
@@ -100,6 +147,7 @@ class SentinelClient:
             user_id=user_id,
             environment=environment,
             retrieved_context=retrieved_context,
+            experiment_id=self._experiment_id,
         )
 
     # ------------------------------------------------------------------

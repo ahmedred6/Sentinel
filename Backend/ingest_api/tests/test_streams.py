@@ -21,15 +21,19 @@ import pytest
 
 from streams import (
     CONSUMER_GROUPS,
+    DIFF_CONSUMER_GROUP,
+    DIFF_STREAM_NAME,
+    MAX_DIFF_STREAM_LEN,
     MAX_STREAM_LEN,
     STREAM_NAME,
     create_consumer_groups,
+    enqueue_diff,
     enqueue_signal,
     enqueue_trace,
 )
 
 # Schema imported via streams.py's sys.path setup
-from schema import Environment, SignalPayload, TokenCounts, TracePayload
+from schema import DiffPayload, Environment, SignalPayload, TokenCounts, TracePayload
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +360,190 @@ def test_signal_payload_survives_roundtrip():
             assert recovered.signal_id == original.signal_id
             assert recovered.trace_id == original.trace_id
             assert recovered.signal_type == original.signal_type
+        finally:
+            await r.aclose()
+
+    asyncio.run(_run())
+
+
+# ===========================================================================
+# sentinel:diffs stream  (DIFF-02)
+# ===========================================================================
+
+def _make_diff(n: int = 0) -> DiffPayload:
+    return DiffPayload(
+        experiment_id=f"exp_{n:04d}",
+        pipeline_name="rfp-eval",
+        developer="ahmed",
+        branch="feature/fix",
+        base_branch="origin/main",
+        commit_sha="abc12345",
+        filtered_diff=f"diff --git a/prompts/file{n}.txt b/prompts/file{n}.txt\n+line {n}\n",
+        original_files={f"prompts/file{n}.txt": f"original {n}"},
+        customer_id=f"cust_{n:04d}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# enqueue_diff
+# ---------------------------------------------------------------------------
+
+def test_enqueue_diff_returns_message_id():
+    async def _run():
+        r = _new_redis()
+        try:
+            mid = await enqueue_diff(_make_diff(), r)
+            assert mid is not None
+            assert b"-" in mid
+        finally:
+            await r.aclose()
+
+    asyncio.run(_run())
+
+
+def test_enqueue_diff_goes_to_diff_stream_not_traces():
+    async def _run():
+        r = _new_redis()
+        try:
+            await enqueue_diff(_make_diff(), r)
+            # sentinel:diffs should have 1 message
+            assert await r.xlen(DIFF_STREAM_NAME) == 1
+            # sentinel:traces should be empty — diffs are separate
+            assert await r.exists(STREAM_NAME) == 0
+        finally:
+            await r.aclose()
+
+    asyncio.run(_run())
+
+
+def test_enqueue_diff_payload_is_valid_json():
+    async def _run():
+        r = _new_redis()
+        try:
+            diff = _make_diff(7)
+            await enqueue_diff(diff, r)
+
+            messages = await r.xrange(DIFF_STREAM_NAME, "-", "+")
+            _, fields = messages[0]
+            data = json.loads(fields[b"payload"])
+
+            assert data["experiment_id"] == "exp_0007"
+            assert data["developer"] == "ahmed"
+            assert data["pipeline_name"] == "rfp-eval"
+        finally:
+            await r.aclose()
+
+    asyncio.run(_run())
+
+
+def test_diff_payload_experiment_id_preserved_in_roundtrip():
+    async def _run():
+        r = _new_redis()
+        try:
+            original = _make_diff(42)
+            await enqueue_diff(original, r)
+
+            messages = await r.xrange(DIFF_STREAM_NAME, "-", "+")
+            _, fields = messages[0]
+            recovered = DiffPayload.model_validate_json(fields[b"payload"])
+
+            assert recovered.experiment_id == original.experiment_id
+            assert recovered.customer_id == original.customer_id
+            assert recovered.filtered_diff == original.filtered_diff
+            assert recovered.original_files == original.original_files
+        finally:
+            await r.aclose()
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# diff-analyzer consumer group sees messages
+# ---------------------------------------------------------------------------
+
+def test_diff_group_receives_enqueued_diffs():
+    async def _run():
+        r = _new_redis()
+        try:
+            await r.xgroup_create(DIFF_STREAM_NAME, DIFF_CONSUMER_GROUP, id="0", mkstream=True)
+
+            for i in range(5):
+                await enqueue_diff(_make_diff(i), r)
+
+            result = await r.xreadgroup(
+                DIFF_CONSUMER_GROUP, "consumer-1", {DIFF_STREAM_NAME: ">"}, count=10
+            )
+            messages = result[0][1]
+            assert len(messages) == 5
+        finally:
+            await r.aclose()
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# create_consumer_groups — diff-analyzer group bootstrap
+# ---------------------------------------------------------------------------
+
+def test_create_consumer_groups_creates_diff_analyzer_group():
+    async def _run():
+        r = _new_redis()
+        try:
+            await create_consumer_groups(r)
+            info = await r.xinfo_groups(DIFF_STREAM_NAME)
+            group_names = {
+                g["name"].decode() if isinstance(g["name"], bytes) else g["name"]
+                for g in info
+            }
+            assert DIFF_CONSUMER_GROUP in group_names
+        finally:
+            await r.aclose()
+
+    asyncio.run(_run())
+
+
+def test_create_consumer_groups_creates_diff_stream():
+    async def _run():
+        r = _new_redis()
+        try:
+            await create_consumer_groups(r)
+            assert await r.exists(DIFF_STREAM_NAME)
+        finally:
+            await r.aclose()
+
+    asyncio.run(_run())
+
+
+def test_create_consumer_groups_idempotent_with_diff_stream():
+    async def _run():
+        r = _new_redis()
+        try:
+            await create_consumer_groups(r)
+            await create_consumer_groups(r)  # BUSYGROUP silently ignored
+        finally:
+            await r.aclose()
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# MAXLEN enforcement — diff stream stays capped at MAX_DIFF_STREAM_LEN
+# ---------------------------------------------------------------------------
+
+def test_diff_stream_capped_at_max_diff_len():
+    async def _run():
+        r = _new_redis()
+        try:
+            small_cap = 20
+            for i in range(small_cap + 10):
+                await r.xadd(
+                    DIFF_STREAM_NAME,
+                    {"payload": f"diff_{i}"},
+                    maxlen=small_cap,
+                    approximate=False,
+                )
+            length = await r.xlen(DIFF_STREAM_NAME)
+            assert length == small_cap, f"Expected {small_cap}, got {length}"
         finally:
             await r.aclose()
 

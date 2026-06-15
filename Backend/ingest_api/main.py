@@ -23,10 +23,10 @@ _SDK_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "senti
 if _SDK_PATH not in sys.path:
     sys.path.insert(0, _SDK_PATH)
 
-from schema import SignalPayload, TracePayload  # noqa: E402
+from schema import DiffPayload, SignalPayload, TracePayload  # noqa: E402
 from auth import require_auth  # noqa: E402
 from dependencies import get_redis, set_clickhouse_client, set_db_pool, set_redis  # noqa: E402
-from streams import create_consumer_groups, enqueue_signal, enqueue_trace  # noqa: E402
+from streams import create_consumer_groups, enqueue_diff, enqueue_signal, enqueue_trace  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Lifespan — connect Redis and PostgreSQL, bootstrap consumer groups
@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
         set_redis(redis_client)
         await create_consumer_groups(redis_client)
         print(f"[startup] Redis connected: {redis_url}")
-        print(f"[startup] Consumer groups ready: {', '.join(['eval-worker', 'ch-writer'])}")
+        print(f"[startup] Consumer groups ready: {', '.join(['eval-worker', 'ch-writer', 'diff-analyzer'])}")
     except Exception as e:
         print(f"[startup] WARNING: Redis unavailable ({e})")
 
@@ -133,6 +133,16 @@ async def ingest_trace(
         return {"status": "ok", "trace_id": payload.trace_id}
     await enqueue_trace(payload, redis)
     return {"status": "ok", "trace_id": payload.trace_id}
+
+
+@app.post("/ingest/diff")
+async def ingest_diff(
+    payload: DiffPayload,
+    customer_id: str = Depends(require_auth),
+    redis: Any = Depends(get_redis),
+) -> dict[str, str]:
+    await enqueue_diff(payload, redis)
+    return {"status": "ok", "experiment_id": payload.experiment_id}
 
 
 @app.post("/ingest/signal")

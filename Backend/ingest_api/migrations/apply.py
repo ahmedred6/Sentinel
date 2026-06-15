@@ -181,6 +181,10 @@ async def apply_postgres() -> None:
         await conn.execute(sql)
         print("[postgres] 002_postgres_core.sql — applied")
 
+        sql = (_MIGRATIONS_DIR / "003_experiments.sql").read_text()
+        await conn.execute(sql)
+        print("[postgres] 003_experiments.sql — applied")
+
         # Verify: list created tables
         rows = await conn.fetch(
             "SELECT tablename FROM pg_tables "
@@ -189,14 +193,14 @@ async def apply_postgres() -> None:
         )
         tables = [row["tablename"] for row in rows]
         sentinel_tables = [t for t in tables if t in
-                           {"api_keys", "customers", "scores", "golden_dataset"}]
+                           {"api_keys", "customers", "scores", "golden_dataset", "experiments"}]
         print(f"[postgres] Sentinel tables present: {sentinel_tables}")
 
         # Verify index creation
         idx_rows = await conn.fetch(
             "SELECT indexname FROM pg_indexes "
             "WHERE schemaname = 'public' AND tablename IN "
-            "('scores','golden_dataset') ORDER BY indexname"
+            "('scores','golden_dataset','experiments') ORDER BY indexname"
         )
         print(f"[postgres] Indexes: {[r['indexname'] for r in idx_rows]}")
     finally:

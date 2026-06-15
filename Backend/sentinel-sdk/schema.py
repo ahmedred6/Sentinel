@@ -166,6 +166,12 @@ class TracePayload(BaseModel):
         description="Prompt, completion, and total token counts for this call."
     )
 
+    # --- Diff Analyzer linkage ---
+    experiment_id: Optional[str] = Field(
+        None,
+        description="Links this trace to a developer pipeline run captured by the Diff Analyzer.",
+    )
+
     # --- Timestamp ---
     timestamp: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
@@ -203,6 +209,43 @@ class TracePayload(BaseModel):
             }
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Diff Analyzer payload model (DIFF-01)
+# ---------------------------------------------------------------------------
+
+class DiffPayload(BaseModel):
+    """
+    Records local git changes for one developer pipeline run.
+    Shipped once per sentinel.init() call to POST /ingest/diff.
+    Linked to TracePayload rows via experiment_id.
+    """
+    experiment_id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        description="UUID shared with every TracePayload from the same run.",
+    )
+    pipeline_name: str = Field(default="", description="Name of the pipeline being run.")
+    developer: str = Field(default="", description="Identifier for the developer running the pipeline.")
+    branch: str = Field(default="unknown", description="Current git branch.")
+    base_branch: str = Field(
+        default="origin/main",
+        description="Reference branch the diff was taken against.",
+    )
+    commit_sha: str = Field(default="unknown", description="Short SHA of the current HEAD commit.")
+    filtered_diff: str = Field(
+        default="",
+        description="Stage-1 filtered git diff (LLM-relevant files only).",
+    )
+    original_files: dict[str, str] = Field(
+        default_factory=dict,
+        description="Filepath → original content for each changed LLM-relevant file.",
+    )
+    customer_id: str
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="UTC timestamp of when the diff was captured.",
+    )
 
 
 # ---------------------------------------------------------------------------

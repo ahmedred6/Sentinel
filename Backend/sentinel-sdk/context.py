@@ -56,6 +56,7 @@ class SentinelTraceContext:
         user_id: Optional[str] = None,
         environment: Environment = Environment.PROD,
         retrieved_context: Optional[list[ContextDocument]] = None,
+        experiment_id: Optional[str] = None,
     ) -> None:
         self._shipper = shipper
         self._customer_id = customer_id
@@ -64,6 +65,7 @@ class SentinelTraceContext:
         self._user_id = user_id
         self._environment = environment
         self._retrieved_context = retrieved_context or []
+        self._experiment_id = experiment_id
         self._trace_id = str(uuid.uuid4())
         self._captured: Optional[dict[str, Any]] = None
 
@@ -101,6 +103,7 @@ class SentinelTraceContext:
                 user_id=self._user_id,
                 environment=self._environment,
                 retrieved_context=list(self._retrieved_context),
+                experiment_id=self._experiment_id,
             )
             with ctx:
                 return func(*args, **kwargs)
@@ -253,6 +256,7 @@ class SentinelTraceContext:
                 flow_name=self._flow_name,
                 environment=self._environment,
                 retrieved_context=self._retrieved_context,
+                experiment_id=self._experiment_id,
                 **self._captured,
             )
             self._shipper.enqueue(_TRACES_ENDPOINT, payload.model_dump(mode="json"))
